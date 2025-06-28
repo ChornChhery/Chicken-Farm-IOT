@@ -3,4 +3,4 @@
 sensor_readings.xlsx
 txt.txt
 from pymongo import MongoClient, AS.txt
-venv
+venv/
