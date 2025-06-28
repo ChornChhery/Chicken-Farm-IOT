@@ -2,5 +2,5 @@
 .env.txt
 sensor_readings.xlsx
 txt.txt
-venv
 from pymongo import MongoClient, AS.txt
+venv
