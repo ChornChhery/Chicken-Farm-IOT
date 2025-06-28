@@ -1,0 +1,351 @@
+from pymongo import MongoClient, ASCENDING
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+
+load_dotenv()
+
+class DatabaseConnection:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(DatabaseConnection, cls).__new__(cls)
+            cls._instance.client = MongoClient(os.getenv('MONGODB_URI'))
+            cls._instance.db = cls._instance.client.chicken_farm
+            # Create index for better query performance
+            cls._instance.db.weights.create_index([('day', ASCENDING)])
+        return cls._instance
+
+    def get_recent_weights(self, limit=100):
+        # Enhanced query to get complete dataset
+        data = list(self.db.weights.find(
+            {"day": {"$exists": True, "$ne": None}},
+            {"_id": 1, "day": 1, "weight": 1, "timestamp": 1}  # Select specific fields
+        ).sort([('day', ASCENDING)]))
+        
+        print(f"Retrieved {len(data)} records")
+        print(f"Day range: {data[0]['day']} to {data[-1]['day']}")
+        print(f"Weight range: {data[0]['weight']} to {data[-1]['weight']}")
+        
+        return data
+
+    def insert_weight(self, device_id, weight, temperature, humidity, batch_id, day):
+        data = {
+            'device_id': device_id,
+            'weight': float(weight),
+            'timestamp': datetime.now(),
+            'temperature': float(temperature),
+            'humidity': float(humidity),
+            'batch_id': batch_id,
+            'day': int(day)  # Ensure day is integer
+        }
+        return self.db.weights.insert_one(data)
+
+    def get_daily_stats(self, date):
+        pipeline = [
+            {
+                '$match': {
+                    'timestamp': {
+                        '$gte': date.replace(hour=0, minute=0, second=0),
+                        '$lt': date.replace(hour=23, minute=59, second=59)
+                    }
+                }
+            },
+            {
+                '$group': {
+                    '_id': None,
+                    'avg_weight': {'$avg': '$weight'},
+                    'max_weight': {'$max': '$weight'},
+                    'min_weight': {'$min': '$weight'},
+                    'count': {'$sum': 1}
+                }
+            }
+        ]
+        return list(self.db.weights.aggregate(pipeline))
+//database.py
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+import random
+
+def get_standard_weight(day):
+    # Standard weights for days 1-5
+    standard_weights = {
+        1: 44,  # Day 1: 44±5g (39-49g)
+        2: 61,  # Day 2: 55±5g (50-60g)
+        3: 79,  # Day 3: 65±5g (60-70g)
+        4: 99,  # Day 4: 75±5g (70-80g)
+        5: 122   # Day 5: 85±5g (80-90g)
+    }
+    return standard_weights[day]
+
+def get_weight_status(weight,min_weight,max_weight):
+    if weight == 0:
+        return 'remove'
+    elif min_weight <= weight <= max_weight:
+        return 'standard'
+    elif weight < min_weight:
+        return 'underweight'
+    else:
+        return 'overweight'
+
+def generate_chicken_data():
+    days = range(1, 6)  # 5 days
+    chickens = range(1, 11)  # 10 chickens
+    
+    data = []
+    for day in days:
+        std_weight = get_standard_weight(day)
+        min_weight = std_weight - 5
+        max_weight = std_weight + 5
+        
+        remaining_chickens = list(chickens)
+        measurement_count = 0
+        
+        while remaining_chickens:
+            measurement_count += 1
+            # Generate batches of 1-2 chickens
+            batch_size = min(random.choice([1, 2]), len(remaining_chickens))
+            batch = random.sample(remaining_chickens, batch_size)
+            
+            for chicken in batch:
+                # Generate weight within standard range
+                weight = random.uniform(min_weight, max_weight)
+                
+                # Occasionally generate outliers (0 or out of range)
+                if random.random() < 0.1:  # 10% chance of outlier
+                    weight = random.choice([0, max_weight + random.uniform(1, 10)])
+                
+                data.append({
+                    'day': day,
+                    'chicken_id': chicken,
+                    'weight': round(weight, 2),
+                    'measurement_batch': measurement_count,
+                    'status': get_weight_status(weight,min_weight,max_weight)
+                })
+            
+            for chicken in batch:
+                remaining_chickens.remove(chicken)
+    
+    return pd.DataFrame(data)
+
+def get_weight_ranges():
+    return {
+        1: (39, 49),
+        2: (50, 60),
+        3: (60, 70),
+        4: (70, 80),
+        5: (80, 90)
+    }
+
+//data_generator.py
+
+
+
+
+
+from shiny import ui, render, reactive
+import plotly.express as px
+import pandas as pd
+import shinyswatch
+from modules.data_generator import generate_chicken_data, get_standard_weight, get_weight_ranges
+
+def dashboard_ui(request):
+    return ui.page_fluid(
+        ui.include_css("static/custom.css"),
+        ui.panel_title("ระบบติดตามการเจริญเติบโตของไก่"),
+        
+        # Standard vs Observed Weight Table
+        ui.row(
+            ui.column(12,
+                ui.card(
+                    ui.card_header("ตารางเปรียบเทียบน้ำหนักมาตรฐานและน้ำหนักที่วัดได้"),
+                    ui.card_body(ui.output_table("standard_comparison"))
+                )
+            )
+        ),
+        
+        # Dual Line Chart Button
+        ui.row(
+            ui.column(12,
+                ui.input_action_button("show_graph", "แสดงกราฟเปรียบเทียบ", class_="btn-primary")
+            )
+        ),
+        
+        # Standard vs Average Weight Line Chart
+        ui.row(
+            ui.column(12,
+                ui.card(
+                    ui.card_header("กราฟเปรียบเทียบน้ำหนักมาตรฐานและค่าเฉลี่ย"),
+                    ui.card_body(ui.output_ui("weight_trend"))
+                )
+            )
+        ),
+        
+        # Daily Measurement Details
+        ui.row(
+            ui.column(12,
+                ui.card(
+                    ui.card_header("ตารางบันทึกการชั่งน้ำหนักรายวัน"),
+                    ui.card_body(ui.output_table("daily_measurements"))
+                )
+            )
+        ),
+        
+        theme=shinyswatch.theme.flatly()
+    )
+
+def dashboard_server(input, output, session):
+    @reactive.Calc
+    def get_data():
+        return generate_chicken_data()
+    
+    @output
+    @render.table
+    def standard_comparison():
+        df = get_data()
+        comparison_data = []
+        
+        for day in range(1, 6):
+            day_data = df[df['day'] == day]
+            valid_data = day_data[day_data['status'] == 'standard']
+            
+            comparison_data.append({
+                'วันที่': day,
+                'น้ำหนักมาตรฐาน': get_standard_weight(day),
+                'น้ำหนักเฉลี่ยที่วัดได้': round(valid_data['weight'].mean(), 2),
+                'จำนวนการวัดที่ถูกต้อง': len(valid_data),
+                'จำนวนค่าผิดปกติ': len(day_data) - len(valid_data)
+            })
+        
+        return pd.DataFrame(comparison_data)
+    
+    @output
+    @render.ui
+    @reactive.event(input.show_graph)
+    def weight_trend():
+        df = get_data()
+        
+        # Calculate daily averages for valid measurements
+        valid_data = df[df['status'] == 'standard']
+        daily_avg = valid_data.groupby('day')['weight'].mean()
+        
+        # Create standard weight line
+        std_weights = pd.Series({day: get_standard_weight(day) for day in range(1, 6)})
+        
+        fig = px.line()
+        fig.add_scatter(
+            x=daily_avg.index, 
+            y=daily_avg.values,
+            name='น้ำหนักเฉลี่ยที่วัดได้',
+            line=dict(color='#0bbfb3', width=2),
+            marker=dict(size=8)
+        )
+        fig.add_scatter(
+            x=std_weights.index,
+            y=std_weights.values,
+            name='น้ำหนักมาตรฐาน',
+            line=dict(color='#850c0c', width=2),
+            marker=dict(size=8)
+        )
+        
+        fig.update_layout(
+            title='กราฟเปรียบเทียบน้ำหนักมาตรฐานและค่าเฉลี่ย',
+            xaxis=dict(
+                title="วัน",
+                tickmode='array',
+                tickvals=list(range(1, 6)),
+                range=[1, 5]
+            ),
+            yaxis_title="น้ำหนัก (กรัม)",
+            height=600,
+            template='plotly_white',
+            legend_title="ประเภท",
+            hovermode='x unified',
+            hoverlabel=dict(
+                bgcolor="white",
+                font_size=12
+            )
+        )
+        
+        return ui.HTML(fig.to_html(include_plotlyjs="cdn", config={'responsive': True}))
+    
+    @output
+    @render.table
+    def daily_measurements():
+        df = get_data()
+        measurement_data = []
+        
+        for day in range(1, 6):
+            day_data = df[df['day'] == day]
+            
+            for chicken_id in range(1, 11):
+                chicken_data = day_data[day_data['chicken_id'] == chicken_id]
+                if not chicken_data.empty:
+                    measurement_data.append({
+                        'วันที่': day,
+                        'รหัสไก่': chicken_id,
+                        'น้ำหนัก (g)': round(chicken_data['weight'].iloc[-1], 2),
+                        'จำนวนครั้งที่ชั่ง': len(chicken_data),
+                        'สถานะ': chicken_data['status'].iloc[-1]
+                    })
+        
+        return pd.DataFrame(measurement_data)
+
+
+//dashboard.py
+
+
+
+
+
+
+
+I want to add something to make this better than this and in real time then this:
+First, I want to change a Line graph of standard weight must be on the of avg weight line like we have a standard weight graph to see how chicken growth up every day to see that avg weight of chicken is on standard or not something like this. Second, I want to count day of chicken that born is start on 8 Feb 2025 last week count it is a day 0 that  chicken born for a chicken born weight is start 40g. Third, I want to show a raw data on the website too is mean that we have a very raw data that need to keep in database and for raw data we need to show on the website because is a true data that we have. For a very raw data is come from sensor that we scan chicken and I want write code to covert that very raw data that we get into database to a raw data to show on the website. Four, These are a logic that I want to do are for our sensor is scan and got data every 5 second while it have a chicken, thing or nothing are on the sensor. IF sensor scan data got an average or weight got negative or is small to much more than a true data or standard weight that we know like we got -192.019 or 0.2 or 0.3 or 1.2g 4g like this is mean that there are nothing or have something that is not a chicken on our sensor that scan that data but that data is still import to very raw data of us in database like a simple but it will must be remove when that data is got covert to a raw data. If sensor scan got an average weight or weight of chicken have a value too big like 584.88 on day 0 or another day that have a value of chicken is bigger too much from standard weight or avg weight is mean that must be have a something are on our sensor not move but that data is import to our very raw data in database like a simple but it must be remove when is covert to a raw data. If sensor scan get a real data real weight and real avg weight of chicken the data is also import to a very raw data in database like simple and it still covert to a raw data for show on website like a simple because that are the data that we want.
+
+For that all of these are what i want to add to this website. I want it work like a real time for database is mongodb that I have been use before I just want to add that only for day I want to show from day 0 until day 56 but to logic it sill the same before just add all of these to my old code to make it better than before
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            <?php if ($isAdmin): ?>
+                <a href="dashboard.php">Dashboard</a>
+                <a href="detail.php#machines">Machines</a>
+                <a href="detail.php#users">Users</a>
+                <a href="detail.php#reports">Reports</a>
+
+when admin click machines admin want to see all machine that I have total of every machine that user use  of every machine how many total like this and admin can also edit or change every detail or delete that machine too. for user when admin click admin want to see what that user total booking total spent of every user cand admin can't edit or delete user account. for report when admin click Just give a report of every machine that use every day and total of every day every month and what that every single user booking machine and spent every day and every month. for the under of that I want to have a graph that show about machine of every machine on the graph and is a bar chart that show how many time that machine spend increase and total money that user spend on every machine.
